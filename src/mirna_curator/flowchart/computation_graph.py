@@ -165,47 +165,22 @@ class ComputationGraph:
             logger.info(f"Applying filter node {self.current_node.name}")
             self.visited_nodes.append(self.current_node.name)
             prompt = list(filter(lambda p: p.name == self.current_node.prompt_name, prompts.prompts))[0]
-
             try:
                 target_section_name = self.infer_target_section_name(llm, prompt, article)
-
                 filter_decision, filter_reasoning = self.current_node.function(
-                    llm,
-                    article.get_section(
-                        target_section_name,
-                        include_figures=True,
-                        figures_placement="end",
-                    ),
-                    True,
-                    prompt.prompt,
-                    rna_id,
-                    config=self.run_config,
-                )
-
+                                                llm, article.get_section(target_section_name, include_figures=True, figures_placement="end"),
+                                                True, prompt.prompt, rna_id, config=self.run_config)
                 node_result = filter_decision
                 node_evidence = ""
                 node_reasoning = filter_reasoning
 
-                curation_tracer.log_event(
-                    "flowchart_filter",
-                    step=self.current_node.name,
-                    evidence=node_evidence,
-                    result=filter_decision,
-                    reasoning=node_reasoning,
-                    loaded_sections=self.loaded_sections,
-                    timestamp=time(),
-                )
+                curation_tracer.log_event("flowchart_filter", step=self.current_node.name, evidence=node_evidence,
+                                        result=filter_decision, reasoning=node_reasoning, loaded_sections=self.loaded_sections, timestamp=time())
 
                 self.visit_results.append(node_result)
                 self.visit_evidences.append(node_evidence)
                 self.visit_reasonings.append(node_reasoning)
-
-                ## Only move to next node after updating everything else
                 self.current_node = self.current_node.transitions[node_result == "yes"]
-                ## It should pretty much always be the case that if we go to a terminal
-                ## node from a filter, there will be no annotation. This just allows us to
-                ## record the reason as an annotation and skip to the next paper.
-                ## Actual handling of the terminal node will be done elsewhere
                 if "terminal" in self.current_node.node_type:
                     break
                 self.node_idx += 1
@@ -228,54 +203,29 @@ class ComputationGraph:
         error_count = 0
         while self.current_node.node_type == "internal":
             print(self.current_node.name)
-            ## Have to filter to get the prompt named by the flowchart node
-            prompt = list(
-                filter(
-                    lambda p: p.name == self.current_node.prompt_name, prompts.prompts
-                )
-            )[0]
-
+            prompt = list(filter(lambda p: p.name == self.current_node.prompt_name, prompts.prompts))[0]
             self.visited_nodes.append(self.current_node.name)
             logger.info(f"Processing node {self.current_node.name}")
 
-            ## see if we already have the target section loaded - this should speed things up provided we can reuse the context
+            # Section loading:
             if not prompt.target_section in self.loaded_sections:
                 logger.info(f"Loading section {prompt.target_section} into context")
-                ## sometimes, the section we want is named differently, so need to use the LLM to figure it out
-                target_section_name = self.infer_target_section_name(
-                    llm, prompt, article
-                )
+                target_section_name = self.infer_target_section_name(llm, prompt, article)
             else:
                 target_section_name = prompt.target_section
 
             try:
-                ## Now we load a section to the context only once, we have to get the node result here.
+                # Context loading:
                 if target_section_name in self.loaded_sections:
                     logger.info("Running condition function, not loading context")
                     llm += self.current_node.function(
-                        article.get_section(
-                            target_section_name,
-                            include_figures=True,
-                            figures_placement="end",
-                        ),
-                        False,
-                        prompt.prompt,
-                        rna_id,
-                        config=self.run_config,
-                    )
+                        article.get_section(target_section_name, include_figures=True, figures_placement="end"),
+                        False, prompt.prompt, rna_id, config=self.run_config)
                 else:
                     logger.info("Running condition function, loading context")
                     llm += self.current_node.function(
-                        article.get_section(
-                            target_section_name,
-                            include_figures=True,
-                            figures_placement="end",
-                        ),
-                        True,
-                        prompt.prompt,
-                        rna_id,
-                        config=self.run_config,
-                    )
+                        article.get_section(target_section_name, include_figures=True, figures_placement="end"),
+                        True, prompt.prompt, rna_id, config=self.run_config)
                     self.loaded_sections.append(target_section_name)
 
             ## TODO: improve specificity of exception handling here

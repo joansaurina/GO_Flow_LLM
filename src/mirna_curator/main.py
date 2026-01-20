@@ -4,13 +4,13 @@ import json
 import logging
 import os
 import sys
+import polars as pl
 
 from pathlib import Path
 from typing import Optional
-
-import polars as pl
 from epmc_xml import fetch
 from pydantic import ValidationError
+from guidance import system, user
 
 from mirna_curator.flowchart import curation, flow_prompts
 from mirna_curator.flowchart.computation_graph import ComputationGraph
@@ -52,16 +52,12 @@ def arg_parser():
             sys.exit(1)
     return args
 
-
 def main():
+    # Load files:
     args = arg_parser()
     curation_tracer.set_model_name(args.model_path)
 
-    ## Build the run config options dict from things in the config
-    run_config_options = {
-        "evidence_mode": args.evidence_type,
-        "deepseek_mode": args.deepseek_mode,
-    }
+    run_config_options = {"evidence_mode": args.evidence_type, "deepseek_mode": args.deepseek_mode}
     try:
         cur_flowchart_string = open(args.flowchart, "r").read()
         cf = curation.CurationFlowchart.model_validate_json(cur_flowchart_string)
@@ -84,34 +80,24 @@ def main():
         logger.info("Validation only, exiting now")
         sys.exit(0)
 
-    ## Validate arguments - exit if something required is set to None
-    if any([
-        args.model_path is None,
-        args.flowchart is None,
-        args.prompts is None,
-        args.input_data is None,
-        args.output_data is None,
-        args.chat_template is None
-    ]):
+    # Validate arguments:
+    if any([args.model_path is None, args.flowchart is None, args.prompts is None,
+        args.input_data is None, args.output_data is None, args.chat_template is None]):
         logger.error("A required argument is set to None, check your config!")
         sys.exit(1)
 
+    # Set GPU and Model:
     if args.gpu is not None:
-        ## Set which GPU to use
         logger.info("Selecting %s gpu for this process", args.gpu)
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-    llm = get_model(
-        args.model_path,
-        chat_template=args.chat_template,
-        quantization=args.quantization,
-        context_length=args.context_length,
-    )
+    llm = get_model(args.model_path, chat_template=args.chat_template, quantization=args.quantization,
+                context_length=args.context_length)
     logger.info(f"Loaded model from {args.model_path}")
 
     graph = ComputationGraph(cf, run_config=run_config_options)
     logger.info("Constructed computation graph")
 
-    ## Get the curation input data and resume if there's a valid checkpoint
+    # Get the curation input data 
     if args.input_data.endswith("parquet") or args.input_data.endswith("pq"):
         curation_input = pl.read_parquet(args.input_data)
     elif args.input_data.endswith("csv"):
@@ -120,12 +106,24 @@ def main():
         logger.error("Unsupported input data format for %s", args.input_data)
         sys.exit(1)
 
-
+    # Resume if there's a valid checkpoint:
     if Path(args.checkpoint_file_path).exists():
         logger.info("Resuming from checkpoint %s", args.checkpoint_file_path)
         done = pl.read_parquet(args.checkpoint_file_path)
         curation_input = curation_input.join(done, on="PMCID", how="anti")
 
+    # UNUSED for now dont't delete:
+    for prompt in prompt_data.prompts:
+        if prompt.type == "system":
+            logger.info("Found system prompt, applying...")
+            try:
+                with system():
+                    llm += prompt.prompt
+            except Exception as e:
+                logger.warning("Selected model does not have a system prompt mode, forward as user instead")
+                with user():
+                    llm += prompt.prompt
+            break
     if args.annot_class is not None:
         logger.info(f"Restricting processing to annotation class {args.annot_class}")
         curation_input = curation_input.filter(pl.col("class") == args.annot_class)
@@ -134,12 +132,11 @@ def main():
     logger.info(f"Processing up to {curation_input.height} papers")
 
     curation_output = []
-    ## This is where we start running the curation graph for all the papers, one by one.
+    
+    # Loop:
     for i, row in enumerate(curation_input.iter_rows(named=True)):
         if args.max_papers is not None and i >= args.max_papers:
             break
-
-        ## See if we need to checkpoint, then write output
         if args.checkpoint_frequency > 0 and i > 0 and i % args.checkpoint_frequency == 0:
             logger.info("Checkpointing results")
             if len(curation_output) > 0:
@@ -147,9 +144,8 @@ def main():
                 if Path(args.checkpoint_file_path).exists():
                     prev = pl.read_parquet(args.checkpoint_file_path)
                     pl.concat([curation_output_df, prev], how="diagonal_relaxed")
-                ## Overwrite the checkpoint to save space
-                curation_output_df.write_parquet(args.checkpoint_file_path)
-
+                else:
+                    curation_output_df.write_parquet(args.checkpoint_file_path)
         try:
             logger.info("Starting curation for paper %s", row["PMCID"])
             article = fetch.article(row["PMCID"])
@@ -158,33 +154,18 @@ def main():
             logger.error(e)
             logger.error(f"Failed to fetch/parse {row['PMCID']}, skipping it")
             continue
-
         try:
-            llm_trace, curation_result = graph.execute_graph(
-                row["PMCID"],
-                llm,
-                article,
-                row["rna_id"],
-                prompt_data,
-            )
+            llm_trace, curation_result = graph.execute_graph(row["PMCID"], llm, article, row["rna_id"], prompt_data)
         except Exception as e:
             logger.error(e)
             logger.error("Paper %s has exceeded context limit, skipping", row["PMCID"])
             faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
             continue
-        logger.info(
-            f"RNA ID: {row['rna_id']} in {row['PMCID']} - Curation Result: {curation_result}"
-        )
-        curation_output.append(
-            {
-                "PMCID": row["PMCID"],
-                "rna_id": row["rna_id"],
-                "curation_result": curation_result,
-            }
-        )
+        logger.info(f"RNA ID: {row['rna_id']} in {row['PMCID']} - Curation Result: {curation_result}")
+        curation_output.append({"PMCID": row["PMCID"], "rna_id": row["rna_id"], "curation_result": curation_result})
+    
     curation_output_df = pl.DataFrame(curation_output)
     curation_output_df.write_parquet(args.output_data)
-
 
 if __name__ == "__main__":
     main()
