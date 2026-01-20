@@ -10,14 +10,23 @@ from guidance import gen, select, system, user, assistant, with_temperature, sub
 from mirna_curator.llm_functions.evidence import extract_evidence
 from mirna_curator.apis import epmc
 from mirna_curator.model.llm import STOP_TOKENS
-from mirna_curator.llm_functions.tools import safe_import
+from mirna_curator.llm_functions.tools import AVAILABLE_TOOLS
 import typing as ty
 
-import logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+def _select_targets_loop(llm, available_genes):
+    """Helper to run the target selection loop"""
+    llm += "Protein name(s): "
+    while True:
+        llm += select(available_genes, name='protein_name', list_append=True)
+        last_target = llm['protein_name'][-1]
+        if last_target in available_genes:
+            available_genes.remove(last_target)
+        
+        llm += select([" and ", "."], name="multi_target_conjunction")
+        if llm["multi_target_conjunction"] == ".":
+            break
+    return llm
 
 @guidance
 def prompted_flowchart_step_bool(
@@ -26,7 +35,7 @@ def prompted_flowchart_step_bool(
     load_article_text: bool,
     step_prompt: str,
     rna_id: str,
-    config: ty.Optional[ty.Dict[str, ty.Any]] = {},
+    config: ty.Optional[ty.Dict[str, ty.Any]] = None,
     temperature_reasoning: ty.Optional[float] = 0.6,
     temperature_selection: ty.Optional[float] = 0.4,
 ) -> guidance.models.Model:
@@ -34,28 +43,21 @@ def prompted_flowchart_step_bool(
     Use the given prompt on the article text to answer a yes/no question,
     returning a boolean
     """
+    if config is None:
+        config = {}
 
     with user():
         llm += f"You will be asked a yes/no question. The answer could be in following text, or it could be in some text you have already seen.\n"
         if load_article_text:
-            logger.info(
-                f"Appending {len(llm.engine.tokenizer.encode(article_text.encode('utf-8')))} tokens (internal node)"
-            )
             llm += f"Text to consider: \n{article_text}\n\n"
         else:
             llm += "Text to consider is included above\n\n"
         llm += f"Question: {step_prompt}\nRestrict your considerations to {rna_id} if there are multiple RNAs mentioned\n"
 
         llm += "Explain your reasoning step-by-step. Be concise\n"
-
-    logger.info(f"LLM input tokens: {llm.engine.metrics.engine_input_tokens}")
-    logger.info(f"LLM generated tokens: {llm.engine.metrics.engine_output_tokens}")
-    logger.info(
-        f"LLM total tokens: {llm.engine.metrics.engine_input_tokens + llm.engine.metrics.engine_output_tokens}"
-    )
     with assistant():
         llm += "Reasoning:\n"
-        if config["deepseek_mode"]:
+        if config.get("deepseek_mode"):
             llm += "<think>\n"
         llm += (
             with_temperature(
@@ -68,18 +70,15 @@ def prompted_flowchart_step_bool(
             )
             + "\n"
         )
-        logger.info("Generated reasoning ok")
 
     with assistant():
         llm += f"The final answer, based on my reasoning above is: " + with_temperature(
             select(["yes", "no"], name="answer"), temperature_selection
         )
-        logger.info("Selected answer ok")
 
     llm += extract_evidence(
         article_text, mode=config.get("evidence_mode", "single-sentence")
     )
-    logger.info("Evidence extracted, ready to return")
 
     return llm
 
@@ -91,8 +90,8 @@ def prompted_flowchart_step_tool(
     load_article_text: bool,
     step_prompt: str,
     rna_id: str,
-    config: ty.Optional[ty.Dict[str, ty.Any]] = {},
-    tools: ty.Optional[ty.List[str]] = [],
+    config: ty.Optional[ty.Dict[str, ty.Any]] = None,
+    tools: ty.Optional[ty.List[str]] = None,
     temperature_reasoning: ty.Optional[float] = 0.6,
     temperature_selection: ty.Optional[float] = 0.4,
 ) -> guidance.models.Model:
@@ -101,18 +100,24 @@ def prompted_flowchart_step_tool(
     returning a boolean
 
     Args:
-        lm: guidance.models.Model: A guidance model that's ready to go
+        llm: guidance.models.Model: A guidance model that's ready to go
         article_text: str: The article text we need to work on
         load_article_text: bool : Flag for whether we are going to load the text into the context
         step_prompt: str: The prompt read from the flowchart json file
         rna_id: str: The RNA id we are working on
         tools: ty.Optional[ty.List[str]] = []: A list of tools for the LLM to use
-        temperature_reasoning: ty.Optional[float] = 0.6: The reasoning temperature (0.6 is R1 reccomended)
+        temperature_reasoning: ty.Optional[float] = 0.6: The reasoning temperature (0.6 is R1 recommended)
         temperature_selection: ty.Optional[float] = 0.4: The yes/no selection temperature
     """
+    if config is None:
+        config = {}
+    if tools is None:
+        tools = []
 
     ## build the tool description string.
-    tool_dict = safe_import(tools)
+    tool_dict = {
+        name: AVAILABLE_TOOLS[name] for name in tools if name in AVAILABLE_TOOLS
+    }
     tools_string = (
         "To help me answer this question, I have access to some tools to look"
         " up some information. The tools are described here:\n"
@@ -132,13 +137,10 @@ def prompted_flowchart_step_tool(
 
     tools_string += "===========================\n"
 
-    _tools = tools
+    _tools = list(tool_dict.keys())
     _tools.append("finish")
     with user():
         if load_article_text:
-            logger.info(
-                f"Appending {len(llm.engine.tokenizer.encode(article_text.encode('utf-8')))} tokens (internal node)"
-            )
             llm += f"You will be asked a yes/no question. The answer could be in following text, or it could be in some text you have already seen: \n{article_text}\n\n"
         else:
             llm += "\n\n"
@@ -157,22 +159,15 @@ def prompted_flowchart_step_tool(
             if llm["act"].lower() == "finish" or i > max_steps:
                 break
             else:
-                logger.info(f"calling {llm['act']} with argument {llm['arg']}")
                 tool_output = tool_dict[llm["act"]](llm["arg"])
                 llm += f"Observation {i}: {tool_output}\n"
             i += 1
         # Restrict your considerations to {rna_id} if there are multiple RNAs mentioned\n"
 
         llm += "Explain your reasoning step-by-step. Be concise\n"
-
-    logger.info(f"LLM input tokens: {llm.engine.metrics.engine_input_tokens}")
-    logger.info(f"LLM generated tokens: {llm.engine.metrics.engine_output_tokens}")
-    logger.info(
-        f"LLM total tokens: {llm.engine.metrics.engine_input_tokens + llm.engine.metrics.engine_output_tokens}"
-    )
     with assistant():
         llm += "Reasoning:\n"
-        if config["deepseek_mode"]:
+        if config.get("deepseek_mode"):
             llm += "<think>\n"
         llm += (
             with_temperature(
@@ -206,16 +201,16 @@ def prompted_flowchart_terminal(
     detector_prompt: str,
     rna_id: str,
     paper_id: str,
-    config: ty.Optional[ty.Dict[str, ty.Any]] = {},
+    config: ty.Optional[ty.Dict[str, ty.Any]] = None,
     temperature_reasoning: ty.Optional[float] = 0.6,
-    temperature_selection: ty.Optional[float] = 0.1,
-    detector=True
 ):
     """
     Use the LLM to find the targets and AEs for the GO annotation
-
     """
-    epmc_annotated_genes = epmc.get_gene_name_annotations(paper_id)
+    if config is None:
+        config = {}
+
+    epmc_annotated_genes = epmc.get_gene_name_annotations(paper_id).copy()
     with user():
         llm += (
             f"You will be asked a question which you must answer using text you have been given. "
@@ -223,9 +218,6 @@ def prompted_flowchart_terminal(
             "If no new text is given, refer to the text you have already seen.\n"
         )
         if load_article_text:
-            logger.info(
-                f"Appending {len(llm.engine.tokenizer.encode(article_text.encode('utf-8')))} tokens (terminal node)"
-            )
             llm += f"New text: \n{article_text}\n\n"
         else:
             llm += "\n\n"
@@ -234,14 +226,9 @@ def prompted_flowchart_terminal(
             f"Select targets from the following list: {','.join(epmc_annotated_genes)}\n"
             "Ignore targets which do not appear in this list."
         )
-    logger.info(f"LLM input tokens: {llm.engine.metrics.engine_input_tokens}")
-    logger.info(f"LLM generated tokens: {llm.engine.metrics.engine_output_tokens}")
-    logger.info(
-        f"LLM total tokens: {llm.engine.metrics.engine_input_tokens + llm.engine.metrics.engine_output_tokens}"
-    )
     with assistant():
         llm += "Reasoning:\n"
-        if config["deepseek_mode"]:
+        if config.get("deepseek_mode"):
             llm += "<think>\n"
         llm += (
             with_temperature(
@@ -255,17 +242,7 @@ def prompted_flowchart_terminal(
             + "\n"
         )
     with assistant():
-        llm += "Protein name(s): "
-        while True:
-            llm += select(epmc_annotated_genes, name='protein_name', list_append=True)
-            last_target = llm['protein_name'][-1]
-            epmc_annotated_genes.remove(last_target)
-            llm += select([" and ", "."], name="multi_target_conjunction")
-            if llm["multi_target_conjunction"] == ".":
-                break
-        # with_temperature(
-        #     gen(max_tokens=10, name="protein_name", stop=["<|end|>", "<|eot_id|>"]), temperature_selection
-        # )
+        llm = _select_targets_loop(llm, epmc_annotated_genes)
 
     llm += extract_evidence(
         article_text, mode=config.get("evidence_mode", "single-sentence")
@@ -284,16 +261,20 @@ def prompted_flowchart_terminal_conditional(
     prompt: str,
     rna_id: str,
     paper_id: str,
-    config: ty.Optional[ty.Dict[str, ty.Any]] = {},
+    config: ty.Optional[ty.Dict[str, ty.Any]] = None,
     temperature_reasoning: ty.Optional[float] = 0.6,
     temperature_selection: ty.Optional[float] = 0.1,
     detector=False,
 ):
     """
-    Use the LLM to find the targets and AEs for the GO annotation
-
+    Use the LLM to find the targets and AEs for the GO annotation, or answer a conditional question
     """
-    epmc_annotated_genes = epmc.get_gene_name_annotations(paper_id)
+    if config is None:
+        config = {}
+
+    if detector:
+        epmc_annotated_genes = epmc.get_gene_name_annotations(paper_id).copy()
+
     with user():
         llm += (
             f"You will be asked a series of questions which you must answer using text you have been given. "
@@ -301,9 +282,6 @@ def prompted_flowchart_terminal_conditional(
             "If no new text is given, refer to the text you have already seen.\n"
         )
         if load_article_text:
-            logger.info(
-                f"Appending {len(llm.engine.tokenizer.encode(article_text.encode('utf-8')))} tokens (terminal conditional node)"
-            )
             llm += f"New text: \n{article_text}\n\n"
         else:
             llm += "\n\n"
@@ -322,7 +300,7 @@ def prompted_flowchart_terminal_conditional(
     with assistant():
         if detector:
             llm += "Reasoning:\n"
-            if config["deepseek_mode"]:
+            if config.get("deepseek_mode"):
                 llm += "<think>\n"
             llm += (
                 with_temperature(
@@ -335,17 +313,10 @@ def prompted_flowchart_terminal_conditional(
                 )
                 + "\n"
             )
-            llm += "Protein name(s): "
-            while True:
-                llm += select(epmc_annotated_genes, name='protein_name', list_append=True)
-                last_target = llm['protein_name'][-1]
-                epmc_annotated_genes.remove(last_target)
-                llm += select([" and ", "."], name="multi_target_conjunction")
-                if llm["multi_target_conjunction"] == ".":
-                    break
+            llm = _select_targets_loop(llm, epmc_annotated_genes)
         else:
             llm += "Reasoning:\n"
-            if config["deepseek_mode"]:
+            if config.get("deepseek_mode"):
                 llm += "<think>\n"
             llm += (
                 with_temperature(
@@ -360,15 +331,9 @@ def prompted_flowchart_terminal_conditional(
             )
             llm += f"The final answer, based on my reasoning above is: " + with_temperature(
             select(["yes", "no"], name="answer"), temperature_selection)
-            logger.info("Selected answer ok")
 
     llm += extract_evidence(
         article_text, mode=config.get("evidence_mode", "single-sentence")
     )
 
-    logger.info(f"LLM input tokens: {llm.engine.metrics.engine_input_tokens}")
-    logger.info(f"LLM generated tokens: {llm.engine.metrics.engine_output_tokens}")
-    logger.info(
-        f"LLM total tokens: {llm.engine.metrics.engine_input_tokens + llm.engine.metrics.engine_output_tokens}"
-    )
     return llm

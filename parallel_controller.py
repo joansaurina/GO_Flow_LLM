@@ -8,14 +8,13 @@ logging, and error handling for concurrent GPU processing.
 
 import subprocess
 import argparse
-import json
 import logging
 import time
 import os
 import sys
 import signal
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from dataclasses import dataclass
 from datetime import datetime
 

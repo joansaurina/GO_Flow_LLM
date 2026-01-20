@@ -6,8 +6,8 @@ import click
 
 prompt_dict = {}
 prompt_lookup = {}
-
-from flask import Flask, render_template_string, request, jsonify
+prompt_data = None
+prompt_filename = None
 
 app = Flask(__name__)
 
@@ -92,11 +92,6 @@ def save():
     return jsonify({"status": "success"})
 
 
-def set_content_dict(new_dict):
-    global prompt_dict
-    prompt_dict = new_dict
-
-
 @click.command()
 @click.option(
     "--prompts", type=click.Path(exists=True), help="JSON file with content dictionary"
@@ -106,7 +101,6 @@ def set_content_dict(new_dict):
     "--host", "-h", default="127.0.0.1", help="Host to run the Flask server on"
 )
 def run(prompts, port, host):
-    global content_dict
     global prompt_dict
     global prompt_lookup
     global prompt_filename
@@ -126,7 +120,7 @@ def run(prompts, port, host):
     prompt_lookup = {p.name: p for p in prompt_data.prompts}
     prompt_lookup.update({d.name: d for d in prompt_data.detectors})
 
-    app.run(debug=True, host=host, port=port)
+    app.run(host=host, port=port)
 
 
 if __name__ == "__main__":

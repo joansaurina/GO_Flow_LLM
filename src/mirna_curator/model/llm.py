@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 STOP_TOKENS = ["<|end|>", "<|eot_id|>", "<|eom_id|>", "</think>", "<|im_end|>"]
 
 
-def download_split_file(repo_id, filenames):
+def _download_split_file(repo_id, filenames):
     """
     Large models are split on hf-hub, this downloads and reconsitutes them for loading
 
@@ -120,7 +120,7 @@ def get_model(
         ValueError:
             When:
                 - When no quant type specified for a repo with multiple ggufs
-                - When the requested quant tyoe was not found in the repo
+                - When the requested quant type was not found in the repo
 
 
 
@@ -174,7 +174,7 @@ def get_model(
                 logging.debug(
                     "Right quantisation found, looks like a sharded file. Downloading shards..."
                 )
-                local_filenames = download_split_file(model_name, matching_ggufs)
+                local_filenames = _download_split_file(model_name, matching_ggufs)
                 ## Giving the first split as local path should work
                 model_path = list(filter(lambda x: "01-of" in x, local_filenames))[0]
             else:
@@ -207,8 +207,8 @@ def get_model(
         seed=-1,
         min_p=0.00,
         top_k=40,
-        top_p=0.95, # This configuration from danhanchen of Unsloth, should
-        repeat_penalty=1.1, # reduce the repetition on reasoning
+        top_p=0.95, # This configuration from danhanchen of Unsloth, should reduce the repetition on reasoning
+        repeat_penalty=1.1, 
         dry_multiplier=0.5,
         samplers="top_k;top_p;min_p;temperature;dry;typ_p;xtc",
     )

@@ -1,51 +1,11 @@
 import wikipedia
 import logging
 import requests
-import sys
-import re
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-__all__ = ["search_wikipedia", "search_cellosaurus"]
-
-
-def safe_import(names: List[str]) -> Dict[str, Any]:
-    """
-    Safely import specified names from this module.
-
-    Args:
-        names: List of function names to import
-
-    Returns:
-        Dictionary mapping names to their corresponding functions
-
-    Raises:
-        ValueError: If a requested name doesn't exist or isn't allowed
-    """
-    # Define the allowed names that can be imported (already defined in __all__ above)
-    allowed_names: Set[str] = set(__all__)
-
-    # Validate all requested names
-    for name in names:
-        # Check if name contains only valid python identifier characters
-        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name):
-            raise ValueError(f"Invalid import name format: {name}")
-
-        # Check if name is in the allowed list
-        if name not in allowed_names:
-            raise ValueError(f"Cannot import '{name}': not found or not allowed")
-
-    # Import the current module
-    current_module = sys.modules[__name__]
-
-    # Build the dictionary of requested objects
-    result = {}
-    for name in names:
-        result[name] = getattr(current_module, name)
-
-    return result
+__all__ = ["search_wikipedia", "search_cellosaurus", "AVAILABLE_TOOLS"]
 
 
 def search_wikipedia(term: str):
@@ -63,7 +23,7 @@ def search_wikipedia(term: str):
 
     try:
         summary = wikipedia.summary(search_hits[0])
-    except:
+    except Exception:
         logger.error(f"Failed to pull a summary for the chosen page {search_hits[0]}")
         return "There isn't a good summary available, try a different search term"
 
@@ -80,47 +40,6 @@ class CellosaurusAPI:
     """
 
     BASE_URL = "https://www.cellosaurus.org/api"
-
-    def __init__(self):
-        """Initialize the CellosaurusAPI wrapper."""
-        # Get release information to verify API is accessible
-        self._check_api_access()
-
-    def _check_api_access(self) -> None:
-        """
-        Check if the API is accessible by getting release info.
-
-        Raises:
-            ConnectionError: If the API cannot be accessed
-        """
-        try:
-            response = self.get_release_info()
-            logger.info(
-                f"Connected to Cellosaurus API (Version: {response.get('version', 'unknown')})"
-            )
-        except Exception as e:
-            raise ConnectionError(f"Could not connect to Cellosaurus API: {str(e)}")
-
-    def get_release_info(self, format: str = "json") -> Dict[str, Any]:
-        """
-        Get information about the current Cellosaurus release.
-
-        Args:
-            format: Response format ('json', 'xml', 'txt', or 'tsv')
-
-        Returns:
-            Dictionary containing release information
-        """
-        endpoint = f"{self.BASE_URL}/release-info"
-        params = {"format": format}
-
-        response = requests.get(endpoint, params=params)
-        response.raise_for_status()
-
-        if format == "json":
-            return response.json()
-        else:
-            return {"content": response.text}
 
     def get_cell_line(
         self, accession: str, fields: Optional[List[str]] = None, format: str = "json"
@@ -209,7 +128,6 @@ class CellosaurusAPI:
 
         # Check caution field
         category = cell_line_data.get("category", [])
-        print(cell_line_data)
         if any(
             keyword in category.lower()
             for keyword in [
@@ -315,34 +233,41 @@ def search_cellosaurus(cell_line_query: str) -> str:
     """
     api = CellosaurusAPI()
 
-    # Get information about HeLa cell line
-    search_results = api.search_cell_lines(cell_line_query)
-    if len(search_results["Cellosaurus"]["cell-line-list"]) == 0:
-        return (
-            f"Cellosaurus does not have any information about {cell_line_query}."
-            "Make sure you only give the cell line id, e.g. HeLa for the search."
+    try:
+        # Get information about HeLa cell line
+        search_results = api.search_cell_lines(cell_line_query)
+        if len(search_results["Cellosaurus"]["cell-line-list"]) == 0:
+            return (
+                f"Cellosaurus does not have any information about {cell_line_query}."
+                "Make sure you only give the cell line id, e.g. HeLa for the search."
+            )
+        accession = search_results["Cellosaurus"]["cell-line-list"][0]["accession-list"][0][
+            "value"
+        ]
+        cell_info = api.get_cell_line(
+            accession, fields=["ca", "di", "transformant", "site", "cell"]
         )
-    print(
-        search_results["Cellosaurus"]["cell-line-list"][0]["accession-list"][0]["value"]
-    )
-    accession = search_results["Cellosaurus"]["cell-line-list"][0]["accession-list"][0][
-        "value"
-    ]
-    cell_info = api.get_cell_line(
-        accession, fields=["ca", "di", "transformant", "site", "cell"]
-    )
 
-    # Get usage information
-    usage = api.get_cell_line_usage(cell_info["Cellosaurus"]["cell-line-list"][0])
-    if usage["is_disease_model"]:
-        summary = f"{cell_line_query} cell line is a disease model\n"
-    else:
-        summary = f"{cell_line_query} cell line is a normal process model\n"
+        # Get usage information
+        usage = api.get_cell_line_usage(cell_info["Cellosaurus"]["cell-line-list"][0])
+        if usage["is_disease_model"]:
+            summary = f"{cell_line_query} cell line is a disease model\n"
+        else:
+            summary = f"{cell_line_query} cell line is a normal process model\n"
 
-    summary += f"{usage}\n"
+        summary += f"{usage}\n"
 
-    summary += "Applications:\n"
-    for app in usage["applications"]:
-        summary += f"- {app}"
+        summary += "Applications:\n"
+        for app in usage["applications"]:
+            summary += f"- {app}"
 
-    return summary
+        return summary
+    except Exception as e:
+        logger.error(f"Error searching cellosaurus: {e}")
+        return f"Error searching Cellosaurus for {cell_line_query}. The tool failed."
+
+
+AVAILABLE_TOOLS = {
+    "search_wikipedia": search_wikipedia,
+    "search_cellosaurus": search_cellosaurus,
+}

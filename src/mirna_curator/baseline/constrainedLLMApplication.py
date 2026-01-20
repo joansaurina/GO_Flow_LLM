@@ -15,18 +15,16 @@ The plan then:
 import polars as pl
 import click
 from mirna_curator.model.llm import get_model
-from functools import wraps
 from epmc_xml import fetch
-import json
-from typing import Optional, Callable
-import time
+from typing import Optional
 import logging
 from guidance import user, assistant, gen, select
 from mirna_curator.model.llm import STOP_TOKENS
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+from mirna_curator.utils.cli import mutually_exclusive_with_config
 
 prompt_template = """You are curating a paper for the miRNA-mRNA interaction it contains.
 To do this, you will evaluate the presented evidence, then choose from one of the following 
@@ -55,63 +53,15 @@ GO:0035279 - miRNA-mediated gene silencing by mRNA destabilization - An RNA inte
 Now think about what evidence is needed to annotate to each term, then select your annotation. Alternatively, if no evidence is given you may choose to select 'No Annotation'
 """
 
-def mutually_exclusive_with_config(config_option: str = "config") -> Callable:
-    """
-    Decorator to ensure CLI parameters are mutually exclusive with config file.
 
-    Args:
-        config_option: Name of the config file option
-    """
-
-    def decorator(f: Callable) -> Callable:
-        @wraps(f)
-        def wrapped_f(*args, **kwargs):
-            ctx = click.get_current_context()
-            config_file = kwargs.get(config_option)
-
-            # Remove config option from kwargs for checking other params
-            kwargs_without_config = {
-                k: v for k, v in kwargs.items() if k != config_option
-            }
-
-            # Check if any other parameters are provided
-            other_params_provided = any(
-                v is not None for v in kwargs_without_config.values()
-            )
-
-            # if config_file is not None and other_params_provided:
-            #     raise click.UsageError(
-            #         "Config file cannot be used together with other CLI parameters."
-            #     )
-
-            if config_file is None and not other_params_provided:
-                raise click.UsageError(
-                    "Either config file or CLI parameters must be provided."
-                )
-
-            # If config file is provided, read it and update kwargs
-            if config_file is not None:
-                try:
-                    with open(config_file, "r") as file_handle:
-                        config = json.load(file_handle)
-                        # Update kwargs with config values
-                        kwargs.update(config)
-                except Exception as e:
-                    raise click.UsageError(f"Error reading config file: {str(e)}")
-
-            return f(*args, **kwargs)
-
-        return wrapped_f
-
-    return decorator
-
-
-def do_curation_constrained(llm, completed_prompt, choices):
+def do_curation_constrained(llm, completed_prompt, choices, deepseek_mode=False):
     with user():
         llm += completed_prompt
 
     with assistant():
-        llm += "<think>" + gen('reasoning', max_tokens=1024, stop=STOP_TOKENS)
+        if deepseek_mode:
+            llm += "<think>"
+        llm += gen('reasoning', max_tokens=1024, stop=STOP_TOKENS)
 
         llm += "\nTherefore the most appropriate choice is " + select(choices, name="annotation")
 
@@ -147,17 +97,15 @@ def main(config: Optional[str] = None,
         input_data: Optional[str] = None,
         output_data: Optional[str] = None,
         ):
+    logging.basicConfig(level=logging.INFO)
 
-    _model_load_start = time.time()
     llm = get_model(
         model_path,
         chat_template=chat_template,
         quantization=quantization,
         context_length=context_length,
     )
-    _model_load_end = time.time()
     logger.info(f"Loaded model from {model_path}")
-    logger.info(f"Model loaded in {_model_load_end - _model_load_start:.2f} seconds")
 
 
 
@@ -173,30 +121,19 @@ def main(config: Optional[str] = None,
     go_terms = ["GO:0035195", "GO:0035278", "GO:0035279", "No Annotation"]
     curation_output = []
 
-    _bulk_processing_start = time.time()
     for i, row in enumerate(curation_input.iter_rows(named=True)):
         try:
             logger.info("Starting curation for paper %s", row["PMCID"])
-            _paper_fetch_start = time.time()
             article = fetch.article(row["PMCID"])
             article.add_figures_section()
-            _paper_fetch_end = time.time()
         except:
             logger.error(f"Failed to fetch/parse {row['PMCID']}, skipping it")
             continue
-        
-        logger.info(
-            f"Fetched and parsed paper in {_paper_fetch_end - _paper_fetch_start:.2f} seconds"
-        )
 
-        _curation_start = time.time()
         completed_prompt = prompt_template.format(paper_text=article.get_body())
 
-        annotation, reasoning = do_curation_constrained(llm, completed_prompt, go_terms)
-        
-        _curation_end = time.time()
-        logger.info(
-            f"Selected term in {_curation_end - _curation_start:.2f} seconds"
+        annotation, reasoning = do_curation_constrained(
+            llm, completed_prompt, go_terms, deepseek_mode=deepseek_mode
         )
         curation_output.append(
             {
@@ -206,16 +143,6 @@ def main(config: Optional[str] = None,
                 "reasoning": reasoning,
             }
         )
-        logger.info(curation_output[-1])
-    _bulk_processing_end = time.time()
-    _bulk_processing_total = _bulk_processing_end - _bulk_processing_start
-    _bulk_processing_average = _bulk_processing_total / len(curation_output)
-    logger.info(
-        f"Curation of {len(curation_output)} articles completed in {_bulk_processing_total:.2f} seconds"
-    )
-    logger.info(
-        f"Average time to curate one paper: {_bulk_processing_average:.2f} seconds"
-    )
     curation_output_df = pl.DataFrame(curation_output)
     if Path(output_data).exists():
         checkpoint = pl.read_parquet(output_data)

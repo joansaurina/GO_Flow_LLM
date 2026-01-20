@@ -1,7 +1,6 @@
 import networkx as nx
 import matplotlib.pyplot as plt
 import polars as pl
-import numpy as np
 import click
 
 import holoviews as hv
@@ -9,13 +8,7 @@ import holoviews as hv
 hv.extension("bokeh")
 from bokeh.plotting import show
 
-import plotly.graph_objects as go
-
 from mirna_curator.flowchart import curation
-
-cf = curation.CurationFlowchart.model_validate_json(
-    open("mirna_curation_flowchart_author_intent.json", "r").read()
-)
 
 
 # I hate this but it works for now
@@ -24,35 +17,39 @@ def get_edges_count(recorded_df: pl.DataFrame, cf: curation.CurationFlowchart):
     cf_true_edges = []
     cf_false_edges = []
     for node in cf.nodes.items():
-        if node[1].type == "terminal":
+        if str(node[1].type).startswith("terminal"):
             continue
         start_node = node[0]
         cf_true_edges.append((start_node, node[1].transitions.true))
         cf_false_edges.append((start_node, node[1].transitions.false))
 
-    def get_true_count(edge):
-        inter = recorded_df.filter((pl.col(f"{edge[0]}_result").is_not_null()))
-        if inter.height == 0:
-            return 0
-        return inter.filter(pl.col(f"{edge[0]}_result")).height
+    decision_nodes = [
+        name for name, node in cf.nodes.items() if not str(node.type).startswith("terminal")
+    ]
 
-    def get_false_count(edge):
-        inter = recorded_df.filter((pl.col(f"{edge[0]}_result").is_not_null()))
-        if inter.height == 0:
-            return 0
-        return inter.filter(pl.col(f"{edge[0]}_result").not_()).height
+    # Calculate counts for all decision nodes at once
+    stats = recorded_df.select(
+        [pl.col(f"{node}_result").is_not_null().sum().alias(f"{node}_total") for node in decision_nodes] +
+        [pl.col(f"{node}_result").sum().alias(f"{node}_true") for node in decision_nodes]
+    )
+    stats_dict = stats.to_dicts()[0]
 
     edges_count = {}
     for edge in cf_true_edges:
-        edges_count[edge] = get_true_count(edge)
+        node = edge[0]
+        edges_count[edge] = stats_dict.get(f"{node}_true", 0)
     for edge in cf_false_edges:
-        edges_count[edge] = get_false_count(edge)
+        node = edge[0]
+        edges_count[edge] = stats_dict.get(f"{node}_total", 0) - stats_dict.get(f"{node}_true", 0)
 
     return edges_count
 
 
 def create_miRNA_flowchart_viz(
-    recorded_df: pl.DataFrame, expected_df: pl.DataFrame, filter_class: int
+    recorded_df: pl.DataFrame,
+    expected_df: pl.DataFrame,
+    filter_class: int,
+    cf: curation.CurationFlowchart,
 ):
     """
     Create a visualization of the miRNA flowchart with node statistics.
@@ -80,47 +77,16 @@ def create_miRNA_flowchart_viz(
         "validated_binding_translation": (4, 0),
         "no_validated_binding": (6, 0),
     }
-    # pos = {
-    #     'experimental_evidence': (0, 8),
-    #     'functional_interaction': (0, 6),
-    #     'effect_endogenous_1': (0, 4),
-    #     'mirna_mrna_binding': (4, 6),
-    #     'effect_endogenous_2': (4, 4),
-    #     'mirna_changes': (4, 2),
-    #     'computational_prediction': (8, 6),
-    #     'effect_endogenous_3': (12, 4),
-    #     'no_annotation': (12, 6),
-    #     'validated_binding_only': (0, 0),
-    #     'validated_binding_mrna': (4, 0),
-    #     'validated_binding_translation': (8, 0),
-    #     'no_validated_binding': (12, 0)
-    # }
 
-    node_labels = {
-        "experimental_evidence": "Experimental Evidence?",
-        "functional_interaction": "Functional interaction by reporter assay?",
-        "effect_endogenous_1": "Effect on endogenous target\ngene expression?",
-        # 'computational_target_only': "Computational target prediction only?",
-        "mirna_mrna_binding": "miRNA-mRNA binding assay?",
-        "effect_endogenous_2": "Effect on endogenous target\ngene expression?",
-        "mirna_changes": "miRNA inhibition or addition\nchanges endogenous\ntarget mRNA level?",
-        "computational_prediction": "Computational target prediction?",
-        "effect_endogenous_3": "Effect on endogenous target\ngene expression?",
-        "no_annotation": "No annotation",
-        "validated_binding_only": "Validated binding only (GO:0035195)",
-        "validated_binding_mrna": "Validated binding\n+ mRNA destabilisation (GO:0035279)",
-        "validated_binding_translation": "Validated binding\n+ translation inhibition (GO:0035278)",
-        "no_validated_binding": "No validated binding (all 3 possible)",
-    }
-
-    # Add nodes
-    for node in pos:
-        G.add_node(node)
+    # Generate node labels dynamically from flowchart
+    node_labels = {}
+    for name, node in cf.nodes.items():
+        node_labels[name] = node.data.desc if node.data.desc else name
 
     edges = []
     edge_colours = []
     for node in cf.nodes.items():
-        if node[1].type == "terminal":
+        if str(node[1].type).startswith("terminal"):
             continue
         start_node = node[0]
         edges.append((start_node, node[1].transitions.true))
@@ -129,29 +95,26 @@ def create_miRNA_flowchart_viz(
         edge_colours.append("r")
 
     G.add_edges_from(edges)
-    # Get list of node columns (excluding PMCID)
-    node_columns = [col for col in recorded_df.columns if col != "PMCID"]
 
     node_columns = list(cf.nodes.keys())
 
+    # Filter out terminal nodes for the result casting
+    decision_nodes = [
+        name for name, node in cf.nodes.items() if not str(node.type).startswith("terminal")
+    ]
+
     recorded_df = recorded_df.with_columns(
         [pl.col(col).cast(pl.Boolean) for col in node_columns]
     )
     recorded_df = recorded_df.with_columns(
-        [
-            pl.col(f"{col}_result").cast(pl.Boolean)
-            for col in filter(lambda x: not x[0] in ["v", "n"], node_columns)
-        ]
+        [pl.col(f"{col}_result").cast(pl.Boolean) for col in decision_nodes]
     )
 
     expected_df = expected_df.with_columns(
         [pl.col(col).cast(pl.Boolean) for col in node_columns]
     )
     expected_df = expected_df.with_columns(
-        [
-            pl.col(f"{col}_result").cast(pl.Boolean)
-            for col in filter(lambda x: not x[0] in ["v", "n"], node_columns)
-        ]
+        [pl.col(f"{col}_result").cast(pl.Boolean) for col in decision_nodes]
     )
 
     expected_columns = expected_df.columns
@@ -181,12 +144,12 @@ def create_miRNA_flowchart_viz(
     plt.figure(figsize=(15, 10))
     plt.title(f"Flowchart results for class {filter_class}", y=1.05, color="k")
 
-    nx.draw(G, pos, node_size=1000)  # , with_labels=True, labels=node_labels)
+    nx.draw(G, pos, node_size=1000)
     for node, (x, y) in pos.items():
         plt.text(
             x,
             y,
-            node_labels[node],
+            node_labels.get(node, node),
             horizontalalignment="center",
             wrap=True,
             bbox=dict(facecolor="white", alpha=0.5, boxstyle="round"),
@@ -200,7 +163,6 @@ def create_miRNA_flowchart_viz(
     plt.xticks([])
     plt.yticks([])
     if filter_class is not None:
-        # plt.title(f"Flowchart results for class {filter_class}", pad=20, y=1.02, color='k')
         plt.savefig(f"flowchart_class_{filter_class}.png")
     else:
         plt.title("Flowchart results for all classes", pad=20, y=1.02)
@@ -209,31 +171,14 @@ def create_miRNA_flowchart_viz(
     return plt.gcf()
 
 
-def create_sankey_df(raw_df):
-    node_label_lookup = {
-        "experimental_evidence": "Has experimental evidence",
-        "functional_interaction": "Has functional interaction",
-        "mirna_mrna_binding": "Has miRNA-mRNA binding assay",
-        "effect_endogenous_1": "Has endogenous expression effect",
-        "disease_model_1": "Study validated binding in normal cells",
-        "disease_model_2": "Study validated binding in normal cells",
-        "effect_endogenous_2": "Has endogenous expression effect",
-        "computational_prediction": "Has computational target prediction",
-        "mirna_changes": "miRNA inhibition changes target mRNA level?",
-        "no_annotation": "No annotation",
-        "validated_binding_only": "GO:0035195 (class 1)",
-        "validated_binding_mrna": "GO:0035279 (class 2)",
-        "validated_binding_translation": "GO:0036278 (class 3)",
-    }
+def create_sankey_df(raw_df, cf: curation.CurationFlowchart):
+    # Generate lookup dynamically from flowchart descriptions
+    node_label_lookup = {name: node.data.desc for name, node in cf.nodes.items() if node.data.desc}
 
     sankey_data = []
-    n_papers = raw_df.count()
     ## figure out edges in the curation flowchart
-    nodes = list(cf.nodes.keys())
-    nodes_plot = hv.Dataset(enumerate(nodes), "index", "label")
 
     for node_name, node in cf.nodes.items():
-        from_idx = nodes.index(node_name)
         if node.type == "decision":
 
             check = raw_df.filter(
@@ -297,70 +242,16 @@ def create_sankey_df(raw_df):
     help="Filter to one class, None means no filtering",
     type=int,
 )
-def main(recorded_df, expected_df, filter_class):
+@click.option("--flowchart", help="Path to the flowchart JSON file", required=True)
+def main(recorded_df, expected_df, filter_class, flowchart):
+    cf = curation.CurationFlowchart.model_validate_json(
+        open(flowchart, "r").read()
+    )
+
     recorded_df = pl.read_parquet(recorded_df).unnest("curation_result")
     expected_df = pl.read_parquet(expected_df)
 
-    # node_label_lookup = {
-    #     "experimental_evidence" : "Has experimental evidence",
-    #     "functional_interaction" : "Has functional interaction",
-    #     "mirna_mrna_binding": "Has miRNA-mRNA binding assay",
-    #     "effect_endogenous_1": "Has endogenous expression effect",
-    #     "disease_model_1": "Study validated binding in normal cells",
-    #     "disease_model_2": "Study validated binding in normal cells",
-    #     "effect_endogenous_2": "Has endogenous expression effect",
-    #     "computational_prediction": "Has computational target prediction",
-    #     "mirna_changes": "miRNA inhibition changes target mRNA level?",
-    #     "no_annotation" : "No annotation",
-    #     "validated_binding_only" : "GO:0035195 (class 1)",
-    #     "validated_binding_mrna": "GO:0035279 (class 2)",
-    #     "validated_binding_translation": "GO:0036278 (class 3)"
-    # }
-
-    # sankey_data = []
-    # n_papers = recorded_df.count()
-    # ## figure out edges in the curation flowchart
-    # nodes = list(cf.nodes.keys())
-    # nodes_plot = hv.Dataset(enumerate(nodes), "index", "label")
-
-    # for node_name, node in cf.nodes.items():
-    #     from_idx = nodes.index(node_name)
-    #     if node.type == "decision":
-
-    #         check = recorded_df.filter(pl.col(f"{node_name}_result").is_not_null()).is_empty()
-    #         if check:
-    #             true_count = 0
-    #             false_count = 0
-    #             continue
-    #         else:
-    #             true_count = (
-    #                 recorded_df.filter(pl.col(f"{node_name}_result").is_not_null())
-    #                 .select(pl.col(f"{node_name}_result").sum())
-    #                 .to_numpy()
-    #                 .flatten()[0]
-    #             )
-    #             if true_count > 0:
-    #                 sankey_data.append({"source" : node_name, "target" : node.transitions.true,  "value" : true_count, "type" : "yes"})
-
-    #             false_count = (
-    #                 recorded_df.filter(pl.col(f"{node_name}_result").is_not_null())
-    #                 .select(pl.col(f"{node_name}_result").not_().sum())
-    #                 .to_numpy()
-    #                 .flatten()[0]
-    #             )
-    #             if false_count > 0:
-    #                 sankey_data.append({"source" : node_name, "target" : node.transitions.false, "value" : false_count, "type" : "no"})
-    # # Modify the source and target names using the mapping
-    # modified_sankey_data = []
-    # for row in sankey_data:
-    #     modified_row = row.copy()  # Create a copy to avoid modifying original data
-    #     modified_row["source"] = node_label_lookup.get(row["source"], row["source"])
-    #     modified_row["target"] = node_label_lookup.get(row["target"], row["target"])
-    #     modified_row["node_color"] = '#3498db'
-    #     modified_sankey_data.append(modified_row)
-
-    sankey_df_recorded = create_sankey_df(recorded_df)
-    # sankey_df_expected = create_sankey_df(expected_df)
+    sankey_df_recorded = create_sankey_df(recorded_df, cf)
 
     color_map = {"yes": "g", "no": "r"}
     edge_colors = sankey_df_recorded.get_column("type").to_list()
@@ -378,10 +269,6 @@ def main(recorded_df, expected_df, filter_class):
 
     # Get unique node names from both start and end points
     nodes = set([edge[0] for edge in edges] + [edge[1] for edge in edges])
-
-    # Create a dictionary mapping each node to the same blue color
-    node_cmap = {node: "#3498db" for node in nodes}
-    print(node_cmap)
 
     sankey = hv.Sankey(
         edges, kdims=["start", "end"], vdims=["Value", "type", "node_color"]
