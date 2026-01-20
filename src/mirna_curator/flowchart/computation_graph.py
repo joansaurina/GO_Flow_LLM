@@ -1,41 +1,34 @@
+import logging
 import typing as ty
-from dataclasses import dataclass
-from guidance.models._base._model import Model
-from guidance import user, assistant, select, gen, with_temperature
 import guidance
+
+from dataclasses import dataclass
+from functools import partial
+from time import time
+
 from epmc_xml.article import Article
-from mirna_curator.utils.tracing import curation_tracer
+from guidance import assistant, gen, select, user, with_temperature
+from guidance.models._base._model import Model
 
-from mirna_curator.flowchart.curation import NodeType, CurationFlowchart
+from mirna_curator.flowchart.curation import CurationFlowchart, NodeType
 from mirna_curator.flowchart.flow_prompts import CurationPrompts
-
 from mirna_curator.llm_functions.conditions import (
     prompted_flowchart_step_bool,
-    prompted_flowchart_terminal,
     prompted_flowchart_step_tool,
-    prompted_flowchart_terminal_conditional,
-)
+    prompted_flowchart_terminal,
+    prompted_flowchart_terminal_conditional)
 from mirna_curator.llm_functions.filtering import prompted_filter
 from mirna_curator.model.llm import STOP_TOKENS
-from time import time
-from functools import partial
-import logging
+from mirna_curator.utils.tracing import curation_tracer
 
 logger = logging.getLogger(__name__)
-
 
 def find_section_heading(llm, target, possibles):
     """
     Finds the most likely section heading given the ones found in the paper.
-
     This is not a guidance function, so the state of the LLM is not modified.
     I think that means we can clear/reset the LLM with no ill effects outside this function
-
-
-
     """
-    # print(dir(llm))
-    # llm.reset()
     try:
         augmentations = {
             "methods": (
@@ -45,8 +38,7 @@ def find_section_heading(llm, target, possibles):
             "results": (
                 "Bear in mind this section is likely to contain the results of the experiments, "
                 "but may also contain the discussion of those results."
-            ),
-        }
+            )}
         with user():
             llm += (
                 f"We are looking for the closest section heading to '{target}' from "
@@ -59,9 +51,7 @@ def find_section_heading(llm, target, possibles):
         with assistant():
             llm += (
                 f"The section heading {target} implies "
-                + with_temperature(
-                    gen("reasoning", max_tokens=512, stop=STOP_TOKENS), 0.6
-                )
+                + with_temperature(gen("reasoning", max_tokens=512, stop=STOP_TOKENS), 0.6)
                 + " therefore the most likely section heading is: "
             )
             llm += select(possibles, name="target_section_name")
@@ -81,7 +71,6 @@ def find_section_heading(llm, target, possibles):
         exit()
     return target_section_name
 
-
 @dataclass
 class ComputationNode:
     function: ty.Callable
@@ -90,7 +79,6 @@ class ComputationNode:
     node_type: ty.Literal["filter", "internal", "terminal"]
     tools: ty.Optional[ty.List[str]]
     name: str
-
 
 class ComputationGraph:
     def __init__(self, flowchart: CurationFlowchart, run_config: ty.Dict = None):
@@ -101,19 +89,17 @@ class ComputationGraph:
 
     def construct_nodes(self, flowchart: CurationFlowchart) -> None:
         """
-        Constructs the nodes we will use, but does not link anything together yet
+        Constructs the nodes:
         """
         self._nodes = {}
-        # first pass, construct the nodes without transitions
+        # 1: Construct the nodes:
         for flow_node_name, flow_node_props in flowchart.nodes.items():
             if flow_node_props.type == NodeType("conditional_prompt_boolean"):
                 function = prompted_flowchart_step_bool
                 prompt = flow_node_props.data.prompt_name
                 node_type = "internal"
             elif flow_node_props.type == NodeType("conditional_tool_use"):
-                function = partial(
-                    prompted_flowchart_step_tool, tools=flow_node_props.data.tools
-                )
+                function = partial(prompted_flowchart_step_tool, tools=flow_node_props.data.tools)
                 prompt = flow_node_props.data.prompt_name
                 node_type = "internal"
             elif flow_node_props.type == NodeType("terminal_full"):
@@ -133,60 +119,38 @@ class ComputationGraph:
                 node_type = "filter"
                 prompt = flow_node_props.data.prompt_name
 
-            ## Initialise node with empty transitions dict
-            this_node = ComputationNode(
-                function=function,
-                name=flow_node_name,
-                node_type=node_type,
-                transitions={},
-                prompt_name=prompt,
-                tools=flow_node_props.data.tools,
-            )
+            this_node = ComputationNode(function=function, name=flow_node_name, node_type=node_type,
+                                    transitions={}, prompt_name=prompt, tools=flow_node_props.data.tools)
             self._nodes[flow_node_name] = this_node
 
-        ## Next pass to link the nodes together correctly
+        # 2: Link the nodes together correctly:
         for flow_node_name, flow_node_props in flowchart.nodes.items():
             flow_transition = flow_node_props.transitions
             if flow_transition is not None:
                 if flow_transition.true is not None:
-                    self._nodes[flow_node_name].transitions[True] = self._nodes[
-                        flow_transition.true
-                    ]
+                    self._nodes[flow_node_name].transitions[True] = self._nodes[flow_transition.true]
                 if flow_transition.false is not None:
-                    self._nodes[flow_node_name].transitions[False] = self._nodes[
-                        flow_transition.false
-                    ]
+                    self._nodes[flow_node_name].transitions[False] = self._nodes[flow_transition.false]
                 if flow_transition.next is not None:
-                    self._nodes[flow_node_name].transitions["next"] = self._nodes[
-                        flow_transition.next
-                    ]
-
+                    self._nodes[flow_node_name].transitions["next"] = self._nodes[flow_transition.next]
         self.start_node = self._nodes[flowchart.startNode]
 
     def infer_target_section_name(self, llm, prompt, article):
         """
-        Check the dsection names in the dictionary first, then fall back to asking the LLM
-        for help if there's no direct match
-
-        This is used in a few places, so makes sense to factor out
+        Check the section names in the dictionary first, then fall back to asking the LLM
+        for help if there's no direct match.
         """
-        ## sometimes, the section we want is named differently, so need to use the LLM to figure it out
         if not prompt.target_section in article.sections.keys():
-            check_subtitles = [
-                prompt.target_section in section_name
-                for section_name in article.sections.keys()
-            ]
+            check_subtitles = [prompt.target_section in section_name
+                            for section_name in article.sections.keys()]
             if not any(check_subtitles):
-                target_section_name = find_section_heading(
-                    llm, prompt.target_section, list(article.sections.keys())
-                )
+                target_section_name = find_section_heading(llm, prompt.target_section, 
+                                    list(article.sections.keys()))
             else:
                 target_section_name = list(article.sections.keys())[
-                    check_subtitles.index(True)
-                ]
+                                    check_subtitles.index(True)]
         else:
             target_section_name = prompt.target_section
-
         return target_section_name
 
     def run_filters(self, llm, article, prompts, rna_id):
@@ -200,19 +164,10 @@ class ComputationGraph:
         while self.current_node.node_type == "filter":
             logger.info(f"Applying filter node {self.current_node.name}")
             self.visited_nodes.append(self.current_node.name)
-
-            ## Have to filter to get the prompt named by the flowchart node
-            prompt = list(
-                filter(
-                    lambda p: p.name == self.current_node.prompt_name, prompts.prompts
-                )
-            )[0]
+            prompt = list(filter(lambda p: p.name == self.current_node.prompt_name, prompts.prompts))[0]
 
             try:
-                ## Find and load the relevant article section
-                target_section_name = self.infer_target_section_name(
-                    llm, prompt, article
-                )
+                target_section_name = self.infer_target_section_name(llm, prompt, article)
 
                 filter_decision, filter_reasoning = self.current_node.function(
                     llm,
