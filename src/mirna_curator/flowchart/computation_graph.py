@@ -243,29 +243,20 @@ class ComputationGraph:
             node_evidence = llm["evidence"]
             node_reasoning = llm["reasoning"]
 
-            curation_tracer.log_event(
-                "flowchart_internal",
-                step=self.current_node.name,
-                evidence=node_evidence,
-                result=llm["answer"].lower().replace("*", ""),
-                reasoning=node_reasoning,
-                loaded_sections=self.loaded_sections,
-                timestamp=time(),
-            )
+            curation_tracer.log_event("flowchart_internal", step=self.current_node.name, evidence=node_evidence, result=llm["answer"].lower().replace("*", ""),
+                                    reasoning=node_reasoning, loaded_sections=self.loaded_sections, timestamp=time())
 
             self.visit_results.append(node_result)
             self.visit_evidences.append(node_evidence)
             self.visit_reasonings.append(node_reasoning)
 
-            ## Move to the next node...
+            # Move to the next node:
             if self.current_node.transitions.get(node_result, None) is not None:
                 self.current_node = self.current_node.transitions[node_result]
             else:
-                annotation = None
-                aes = None
                 break
             self.node_idx += 1
-            ## Terminal node handling -
+            # Terminal node handling:
             if "terminal" in self.current_node.node_type:
                 logger.info(f"Hit terminal node {self.current_node.name}")
                 break
@@ -289,13 +280,7 @@ class ComputationGraph:
             if self.current_node.prompt_name is None:
                 prompt = None
             else:
-                prompt = list(
-                    filter(
-                        lambda p: p.name == self.current_node.prompt_name,
-                        prompts.prompts,
-                    )
-                )[0]
-
+                prompt = list(filter(lambda p: p.name == self.current_node.prompt_name, prompts.prompts))[0]
 
             if prompt is None:
                 annotation = None
@@ -309,38 +294,21 @@ class ComputationGraph:
                 target_name = ""
 
             else:
-                ## Only lookup the target section name if we are actually going to use it
-                target_section_name = self.infer_target_section_name(
-                    llm, prompt, article
-                )
+                target_section_name = self.infer_target_section_name(llm, prompt, article)
                 if self.current_node.node_type == "terminal_full":
                     annotation = prompt.annotation
-                    detector = list(
-                        filter(lambda d: d.name == prompt.detector, prompts.detectors)
-                    )[0]
-                    ## Now we load a section to the context only once, we have to get the node result here.
+                    detector = list(filter(lambda d: d.name == prompt.detector, prompts.detectors))[0]
+                    # Now we load a section to the context only once, we have to get the node result here:
                     if target_section_name in self.loaded_sections:
-                        llm += self.current_node.function(
-                            article.sections[target_section_name],
-                            False,
-                            detector.prompt,
-                            rna_id,
-                            paper_id,
-                            config=self.run_config,
-                        )
+                        llm += self.current_node.function(article.sections[target_section_name], False, detector.prompt, rna_id,
+                                                        paper_id, config=self.run_config)
                     else:
-                        llm += self.current_node.function(
-                            article.sections[target_section_name],
-                            True,
-                            detector.prompt,
-                            rna_id,
-                            paper_id,
-                            config=self.run_config,
-                        )
+                        llm += self.current_node.function(article.sections[target_section_name], True, detector.prompt, rna_id,
+                                                        paper_id, config=self.run_config)
                         self.loaded_sections.append(target_section_name)
 
-                    ## extract results from the LLM
-                    ## handle multiple targets
+                    # Extract results from the LLM:
+                    # handle multiple targets:
                     if len(llm['protein_name']) > 1:
                         targets = [t.strip() for t in llm['protein_name']]
                         aes = { f"{detector.name}_{idx}" : t  for idx, t in enumerate(targets) }
@@ -351,9 +319,7 @@ class ComputationGraph:
                     node_evidence = llm["evidence"]
                 else: ## conditional terminal annotation - quite rare!
                     annotations = prompt.annotation ## This will be a dictionary now
-                    detector = list(
-                        filter(lambda d: d.name == prompt.detector, prompts.detectors)
-                    )[0]
+                    detector = list(filter(lambda d: d.name == prompt.detector, prompts.detectors))[0]
                     conditional_prompts = prompt.prompt ## This is a list of N questions
                     decisions = ""
                     for p in conditional_prompts:
@@ -434,27 +400,12 @@ class ComputationGraph:
         ## These will only have something in if the node was a terminal
         return annotation, aes
 
-    def execute_graph(
-        self,
-        paper_id: str,
-        llm: Model,
-        article: Article,
-        rna_id: str,
-        prompts: CurationPrompts,
-    ):
+    def execute_graph(self, paper_id: str, llm: Model, article: Article, rna_id: str, prompts: CurationPrompts):
         curation_tracer.set_paper_id(paper_id)
         self.current_node = self._nodes[self.start_node.name]
 
-        curation_tracer.log_event(
-            "flowchart_init",
-            step="startup_timestamp",
-            evidence="",
-            result="",
-            reasoning="",
-            loaded_sections=[],
-            timestamp=time(),
-        )
-        ## These still need to be reset within a run, so keep this
+        curation_tracer.log_event("flowchart_init", step="startup_timestamp", evidence="", result="",
+                                reasoning="", loaded_sections=[], timestamp=time())
         self.node_idx = 0
         self.visited_nodes = []
         self.visit_results = []
@@ -464,26 +415,15 @@ class ComputationGraph:
 
         self.run_filters(llm, article, prompts, rna_id)
 
-        annotation, aes = self.terminal_node_check(
-            llm, article, prompts, rna_id, paper_id
-        )
+        annotation, aes = self.terminal_node_check(llm, article, prompts, rna_id, paper_id)
         if annotation is None and self.current_node.node_type != "terminal":
-            ## means the filtering steps did not end on a terminal node, so continue curation
+            # Filtering steps did not end on a terminal node:
             llm += self.run_nodes(article, prompts, rna_id)
-            ## Once this is done, we should have hit a terminal node, so we can update the annotation and aes
-            annotation, aes = self.terminal_node_check(
-                llm, article, prompts, rna_id, paper_id
-            )
+            # Should hit a terminal node, update the annotation and aes:
+            annotation, aes = self.terminal_node_check(llm, article, prompts, rna_id, paper_id)
 
-        curation_tracer.log_event(
-            "flowchart_end",
-            setp="finish_timestamp",
-            evidence="",
-            result="",
-            reasoning="",
-            loaded_sections=[],
-            timestamp=time(),
-        )
+        curation_tracer.log_event("flowchart_end", setp="finish_timestamp", evidence="", result="",
+                                reasoning="", loaded_sections=[], timestamp=time())
         all_nodes = list(self._nodes.keys())
         result = {n: None for n in all_nodes}
         result.update({f"{n}_result": None for n in all_nodes})

@@ -1,12 +1,12 @@
 import wikipedia
 import logging
 import requests
+
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["search_wikipedia", "search_cellosaurus", "AVAILABLE_TOOLS"]
-
 
 def search_wikipedia(term: str):
     """
@@ -28,7 +28,6 @@ def search_wikipedia(term: str):
         return "There isn't a good summary available, try a different search term"
 
     return summary
-
 
 class CellosaurusAPI:
     """

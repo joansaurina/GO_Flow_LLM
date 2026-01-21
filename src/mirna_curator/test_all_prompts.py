@@ -1,7 +1,5 @@
 """
 Load all the questions and run them all across all the dev set of papers
-
-
 """
 
 from mirna_curator.flowchart.flow_prompts import CurationPrompts
@@ -9,8 +7,8 @@ from mirna_curator.llm_functions.conditions import prompted_flowchart_step_bool
 from mirna_curator.model.llm import get_model
 import click
 import polars as pl
-from guidance import user, assistant, select, gen
-from functools import partial, wraps
+from guidance import user, assistant, select
+from functools import partial
 from tqdm import tqdm
 from epmc_xml import fetch
 import sqlite3

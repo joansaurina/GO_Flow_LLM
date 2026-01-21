@@ -13,7 +13,7 @@ def prompted_filter(
     config: ty.Optional[ty.Dict[str, ty.Any]] = None,
     temperature_reasoning: ty.Optional[float] = 0.6,
     temperature_selection: ty.Optional[float] = 0.1,
-) -> str:
+) -> ty.Tuple[str, str]:
     """
     This is not a guidance function, so the results of this do not get persisted in model state
     """

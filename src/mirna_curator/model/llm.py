@@ -37,7 +37,7 @@ def _download_split_file(repo_id, filenames):
     """
     Large models are split on hf-hub, this downloads and reconsitutes them for loading
 
-    We download each file in turn to a local dir, thenconcatenate it to one big file
+    We download each file in turn to a local dir, then concatenate it to one big file
     Each downloaded file will be immediately deleted to save space
 
     Parameters

@@ -1,7 +1,6 @@
 from typing import List, Optional, Literal, Dict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Union
-
 
 class Prompt(BaseModel):
     name: str
@@ -20,12 +19,10 @@ class Prompt(BaseModel):
     annotation: Optional[Dict[str, Dict]] = None
     legacy_annotation: Optional[str] = None
 
-
 class Detector(BaseModel):
     name: str
     type: Literal["AE"]
     prompt: str = ""
-
 
 class CurationPrompts(BaseModel):
     prompts: List[Prompt]

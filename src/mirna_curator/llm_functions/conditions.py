@@ -1,18 +1,12 @@
-"""
-Here, we define functions using the LLM to check the conditions in the 
-flowchart. Each function name must match the name given for the 
-condition in the flowchart
-"""
-
 import guidance
-from guidance import gen, select, system, user, assistant, with_temperature, substring
+import typing as ty
+
+from guidance import gen, select, user, assistant, with_temperature
 
 from mirna_curator.llm_functions.evidence import extract_evidence
 from mirna_curator.apis import epmc
 from mirna_curator.model.llm import STOP_TOKENS
 from mirna_curator.llm_functions.tools import AVAILABLE_TOOLS
-import typing as ty
-
 
 def _select_targets_loop(llm, available_genes):
     """Helper to run the target selection loop"""

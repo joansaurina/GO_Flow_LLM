@@ -7,7 +7,6 @@ import sys
 import polars as pl
 
 from pathlib import Path
-from typing import Optional
 from epmc_xml import fetch
 from pydantic import ValidationError
 from guidance import system, user

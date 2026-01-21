@@ -1,14 +1,13 @@
 import json
 import logging
 import datetime
-from pathlib import Path
-from typing import Any, Dict, Optional
 import uuid
 
+from pathlib import Path
+from typing import Any
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 class EventLogger:
     """Logger for event sourcing pattern that writes to NDJSON files"""
@@ -85,7 +84,6 @@ class EventLogger:
         with open(self._get_current_filename(), "a", encoding="utf-8") as f:
             json.dump(event_dict, f)
             f.write("\n")
-
 
 # Create singleton object when this module is imported
 curation_tracer = EventLogger()
